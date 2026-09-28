@@ -1,7 +1,5 @@
 // ============================================================
 // BeStreak — lógica principal (Clerk auth + Supabase datos/cámara)
-// v2: temas, chat, ranking, heatmap, badges, freezes, racha grupal,
-//     reacciones/comentarios, muro de castigos, admin, push, zoom real.
 // ============================================================
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -33,7 +31,7 @@ const todayStr = () => {
 };
 
 // ============================================================
-// SONIDOS (generados con Web Audio, sin archivos externos)
+// SONIDOS (Web Audio API)
 // ============================================================
 let audioCtx = null;
 function beep(freq, durationMs, volume = 0.12, type = 'sine', delayMs = 0) {
@@ -49,14 +47,14 @@ function beep(freq, durationMs, volume = 0.12, type = 'sine', delayMs = 0) {
     gain.gain.exponentialRampToValueAtTime(0.001, startAt + durationMs / 1000);
     osc.connect(gain); gain.connect(audioCtx.destination);
     osc.start(startAt); osc.stop(startAt + durationMs / 1000);
-  } catch (_) { /* audio no soportado/no autorizado todavía, no pasa nada */ }
+  } catch (_) {}
 }
 function playSoundSent() { beep(880, 90, 0.1, 'sine'); beep(1180, 90, 0.08, 'sine', 60); }
 function playSoundReceived() { beep(520, 100, 0.1, 'sine'); beep(700, 120, 0.08, 'sine', 70); }
 function playSoundShutter() { beep(1400, 60, 0.06, 'square'); }
 
 // ============================================================
-// EVITAR ZOOM AL DOBLE TAP (la app queda fija en 1x)
+// EVITAR ZOOM AL DOBLE TAP Y SELECCIÓN DE TEXTO NO DESEADA
 // ============================================================
 (function disableDoubleTapZoom() {
   let lastTouchEnd = 0;
@@ -69,21 +67,34 @@ function playSoundShutter() { beep(1400, 60, 0.06, 'square'); }
 })();
 
 // ============================================================
-// DESLIZAR HACIA LA IZQUIERDA EN EL HOME → ABRE LA CÁMARA
+// GESTOS TÁCTILES ESTILO INSTAGRAM (Izq: Cámara / Der: Chat)
 // ============================================================
-(function setupSwipeToCamera() {
-  const zone = $('tab-hoy');
+(function setupSwipeGestures() {
+  const zone = $('screen-feed');
   let startX = 0, startY = 0, tracking = false;
+
   zone.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) return;
-    startX = e.touches[0].clientX; startY = e.touches[0].clientY; tracking = true;
+    startX = e.touches[0].clientX; 
+    startY = e.touches[0].clientY; 
+    tracking = true;
   }, { passive: true });
+
   zone.addEventListener('touchend', (e) => {
     if (!tracking) return;
     tracking = false;
     const dx = (e.changedTouches[0].clientX - startX);
     const dy = (e.changedTouches[0].clientY - startY);
-    if (dx < -70 && Math.abs(dx) > Math.abs(dy) * 1.8) openCapture();
+
+    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      if (dx < 0) {
+        // Deslizar a la izquierda -> Abre cámara directamente
+        openCapture();
+      } else {
+        // Deslizar a la derecha -> Abre chat directamente
+        switchTab('tab-chat');
+      }
+    }
   }, { passive: true });
 })();
 
@@ -100,7 +111,7 @@ function waitForClerk(timeoutMs = 8000) {
       if (window.Clerk) { clearInterval(check); resolve(); }
       else if (Date.now() - start > timeoutMs) {
         clearInterval(check);
-        reject(new Error('Clerk no cargó a tiempo (revisa tu conexión o que la clave/dominio de Clerk sean correctos)'));
+        reject(new Error('Clerk no cargó a tiempo'));
       }
     }, 50);
   });
@@ -152,8 +163,6 @@ function renderThemeGrid() {
   });
 }
 
-// Aplica un tema guardado (localStorage) mientras carga, para que no
-// haya "flash" de blanco antes de saber el tema real del perfil.
 applyTheme(localStorage.getItem('bestreak-theme'));
 
 // ============================================================
@@ -170,7 +179,6 @@ function switchTab(tabId) {
   if (tabId === 'tab-perfil') { renderProfileTab(); }
 }
 
-// ---------- Overlays: Ranking / Perfil de otro usuario / Admin ----------
 function openOverlay(id) { document.getElementById(id).classList.add('active'); }
 function closeOverlay(id) { document.getElementById(id).classList.remove('active'); }
 
@@ -182,8 +190,6 @@ $('btn-close-admin').addEventListener('click', () => closeOverlay('screen-admin-
 
 $('btn-close-user-profile').addEventListener('click', () => closeOverlay('screen-user-profile-overlay'));
 
-// Avatar helper: pone la imagen si existe, o un círculo con la inicial
-// del nombre de usuario si la persona todavía no ha subido foto de perfil.
 function paintAvatar(imgEl, fallbackEl, avatarUrl, username) {
   if (avatarUrl) {
     imgEl.src = avatarUrl; imgEl.style.display = '';
@@ -197,8 +203,6 @@ function paintAvatar(imgEl, fallbackEl, avatarUrl, username) {
   }
 }
 
-// Abre el perfil de cualquier miembro del grupo tocando su nombre.
-// Si es tu propio nombre, simplemente te lleva a tu pestaña "Perfil".
 async function openUserProfile(userId) {
   if (userId === currentUser.id) { switchTab('tab-perfil'); return; }
   const { data: profile } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
@@ -278,11 +282,10 @@ async function handleLoggedIn(user) {
   await resetMonthlyFreezesIfNeeded();
   await loadGroup();
   setupChatRealtime();
-  registerServiceWorkerAndPush(); // no bloqueante
+  registerServiceWorkerAndPush();
   await renderFeed();
 }
 
-// Da rol admin automáticamente a ADMIN_EMAIL apenas detectamos su sesión.
 async function maybeGrantAdmin() {
   try {
     const email = currentUser?.primaryEmailAddress?.emailAddress
@@ -291,7 +294,7 @@ async function maybeGrantAdmin() {
       const { data } = await sb.from('profiles').update({ is_admin: true }).eq('id', currentUser.id).select().maybeSingle();
       if (data) currentProfile = data;
     }
-  } catch (_) { /* si falla, simplemente no se activa admin todavía */ }
+  } catch (_) {}
   $('btn-open-admin').classList.toggle('hidden', !currentProfile.is_admin);
 }
 
@@ -307,15 +310,14 @@ async function recoverFromDuplicateProfile(msgElId) {
       await renderFeed();
       return true;
     }
-    $(msgElId).textContent = 'Ya existe un perfil con tu cuenta, pero no pudimos cargarlo. Cierra sesión y vuelve a entrar.';
+    $(msgElId).textContent = 'Ya existe un perfil con tu cuenta, pero no pudimos cargarlo.';
     return false;
   } catch (err) {
-    $(msgElId).textContent = 'Ya existe un perfil con tu cuenta, pero no pudimos cargarlo (' + (err?.message || err) + '). Cierra sesión y vuelve a entrar.';
+    $(msgElId).textContent = 'Ya existe un perfil con tu cuenta (' + (err?.message || err) + ').';
     return false;
   }
 }
 
-// ---------- Login ----------
 $('btn-open-login').addEventListener('click', () => {
   window.Clerk.openSignIn({ afterSignInUrl: window.location.href, afterSignUpUrl: window.location.href });
 });
@@ -327,7 +329,6 @@ $('btn-logout').addEventListener('click', async () => {
   showScreen('screen-login');
 });
 
-// ---------- Onboarding ----------
 $('btn-tab-join').addEventListener('click', () => {
   $('join-box').classList.remove('hidden');
   $('create-box').classList.add('hidden');
@@ -414,11 +415,10 @@ async function renderFeed() {
   $('my-streak').textContent = currentProfile.streak_count;
   $('my-streak-2').textContent = currentProfile.streak_count;
   $('my-freezes').textContent = `❄️ ${currentProfile.freezes_available ?? 0}`;
-  paintAvatar($('nav-avatar-img'), $('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
+  paintAvatar($('nav-avatar-img'),$('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
 
   if ((currentGroup.group_streak_count || 0) > 0) {
-    $('group-perfect-badge').classList.remove('hidden');
-    $('group-perfect-count').textContent = currentGroup.group_streak_count;
+    $('group-perfect-badge').classList.remove('hidden');$('group-perfect-count').textContent = currentGroup.group_streak_count;
   } else {
     $('group-perfect-badge').classList.add('hidden');
   }
@@ -427,14 +427,12 @@ async function renderFeed() {
     .eq('user_id', currentUser.id).eq('date', todayStr()).maybeSingle();
 
   if (!myPostToday) {
-    $('feed-locked').classList.remove('hidden');
-    $('feed-unlocked').classList.add('hidden');
+    $('feed-locked').classList.remove('hidden');$('feed-unlocked').classList.add('hidden');
     return;
   }
 
   $('feed-locked').classList.add('hidden');
-  $('feed-unlocked').classList.remove('hidden');
-  $('feed-unlocked').classList.add('flex');
+  $('feed-unlocked').classList.remove('hidden');$('feed-unlocked').classList.add('flex');
 
   const { data: posts } = await sb.from('posts')
     .select('*, profiles(username, streak_count, avatar_url), post_reactions(user_id, emoji), post_comments(id, user_id, body, created_at, profiles(username))')
@@ -528,7 +526,7 @@ async function toggleReaction(postId, emoji) {
 }
 
 // ============================================================
-// RANKING + MURO DE CASTIGOS
+// RANKING Y CASTIGOS
 // ============================================================
 async function renderRanking() {
   const { data: members } = await sb.from('profiles').select('*')
@@ -577,7 +575,7 @@ async function renderRanking() {
 }
 
 // ============================================================
-// CHAT DE GRUPO
+// CHAT
 // ============================================================
 async function renderChat() {
   const { data: messages } = await sb.from('group_messages').select('*, profiles(username, avatar_url)')
@@ -640,8 +638,7 @@ function teardownChat() {
   if (chatChannel) { sb.removeChannel(chatChannel); chatChannel = null; }
 }
 
-$('btn-chat-send').addEventListener('click', sendChatMessage);
-$('chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChatMessage(); });
+$('btn-chat-send').addEventListener('click', sendChatMessage);$('chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChatMessage(); });
 async function sendChatMessage() {
   const input = $('chat-input');
   const body = input.value.trim();
@@ -653,7 +650,7 @@ async function sendChatMessage() {
 }
 
 // ============================================================
-// PERFIL: heatmap + badges + freezes + temas
+// PERFIL
 // ============================================================
 const BADGE_MILESTONES = [
   { days: 7, label: '7 días', emoji: '🥉' },
@@ -668,8 +665,7 @@ const BADGE_MILESTONES = [
 async function renderProfileTab() {
   $('input-edit-username').value = currentProfile.username;
   $('input-edit-bio').value = currentProfile.bio || '';
-  paintAvatar($('profile-avatar-img'), $('profile-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
-  $('profile-best').textContent = currentProfile.best_streak ?? 0;
+  paintAvatar($('profile-avatar-img'), $('profile-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);$('profile-best').textContent = currentProfile.best_streak ?? 0;
   $('my-streak-2').textContent = currentProfile.streak_count ?? 0;
   $('profile-freezes').textContent = currentProfile.freezes_available ?? 0;
   renderThemeGrid();
@@ -710,7 +706,6 @@ async function renderProfileTab() {
   });
 }
 
-// ---------- Editar perfil: username + bio ----------
 $('btn-save-profile').addEventListener('click', async () => {
   const username = $('input-edit-username').value.trim();
   const bio = $('input-edit-bio').value.trim();
@@ -721,12 +716,10 @@ $('btn-save-profile').addEventListener('click', async () => {
   btn.disabled = false; btn.textContent = original;
   if (error) { alert('No se pudo guardar tu perfil: ' + error.message); return; }
   if (data) currentProfile = data;
-  paintAvatar($('nav-avatar-img'), $('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
+  paintAvatar($('nav-avatar-img'),$('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
 });
 
-// ---------- Editar perfil: foto de avatar ----------
-$('btn-change-avatar').addEventListener('click', () => $('input-avatar-file').click());
-$('input-avatar-file').addEventListener('change', async (e) => {
+$('btn-change-avatar').addEventListener('click', () => $('input-avatar-file').click());$('input-avatar-file').addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   e.target.value = '';
   if (!file) return;
@@ -735,19 +728,19 @@ $('input-avatar-file').addEventListener('change', async (e) => {
     const { error: upErr } = await sb.storage.from('daily-snaps').upload(path, file, { upsert: true, contentType: file.type || 'image/webp' });
     if (upErr) { alert('No se pudo subir la foto: ' + upErr.message); return; }
     const { data: pub } = sb.storage.from('daily-snaps').getPublicUrl(path);
-    const avatar_url = pub.publicUrl + '?t=' + Date.now(); // evita caché vieja
+    const avatar_url = pub.publicUrl + '?t=' + Date.now();
     const { data, error } = await sb.from('profiles').update({ avatar_url }).eq('id', currentUser.id).select().maybeSingle();
     if (error) { alert('No se pudo guardar tu foto de perfil: ' + error.message); return; }
     if (data) currentProfile = data;
-    paintAvatar($('profile-avatar-img'), $('profile-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
-    paintAvatar($('nav-avatar-img'), $('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
+    paintAvatar($('profile-avatar-img'),$('profile-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
+    paintAvatar($('nav-avatar-img'),$('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
   } catch (err) {
     alert('Error inesperado subiendo tu foto: ' + (err?.message || err));
   }
 });
 
 async function resetMonthlyFreezesIfNeeded() {
-  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const month = new Date().toISOString().slice(0, 7);
   if (currentProfile.last_freeze_reset_month !== month) {
     const { data } = await sb.from('profiles')
       .update({ freezes_available: 2, last_freeze_reset_month: month })
@@ -791,17 +784,15 @@ async function renderAdmin() {
 }
 
 // ============================================================
-// CAPTURA (sin espejo, con zoom real, auto-envío)
+// CÁMARA & GALERÍA DIRECTAS
 // ============================================================
 $('btn-go-capture').addEventListener('click', openCapture);
-$('btn-close-capture').addEventListener('click', closeCapture);
-$('btn-retry-camera').addEventListener('click', startCamera);
+$('btn-close-capture').addEventListener('click', closeCapture);$('btn-retry-camera').addEventListener('click', startCamera);
 
 function openCapture() {
   showScreen('screen-capture');
-  $('capture-live').classList.remove('hidden'); $('capture-live').classList.add('flex');
-  $('capture-preview').classList.add('hidden');
-  $('capture-error').classList.add('hidden');
+  $('capture-live').classList.remove('hidden');$('capture-live').classList.add('flex');
+  $('capture-preview').classList.add('hidden');$('capture-error').classList.add('hidden');
   startCamera();
 }
 
@@ -813,8 +804,8 @@ function closeCapture() {
 }
 
 async function startCamera() {
-  $('capture-error').classList.add('hidden'); $('capture-error').classList.remove('flex');
-  $('capture-live').classList.remove('hidden'); $('capture-live').classList.add('flex');
+  $('capture-error').classList.add('hidden');$('capture-error').classList.remove('flex');
+  $('capture-live').classList.remove('hidden');$('capture-live').classList.add('flex');
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 1080 }, height: { ideal: 1440 } },
@@ -823,35 +814,30 @@ async function startCamera() {
     $('video').srcObject = mediaStream;
     setupZoom();
   } catch (err) {
-    $('capture-live').classList.add('hidden'); $('capture-live').classList.remove('flex');
-    $('capture-error').classList.remove('hidden'); $('capture-error').classList.add('flex');
+    $('capture-live').classList.add('hidden');$('capture-live').classList.remove('flex');
+    $('capture-error').classList.remove('hidden');$('capture-error').classList.add('flex');
   }
 }
 
-// Zoom "profesional": usa el zoom óptico/de hardware si el navegador lo
-// expone (Chrome/Android); si no, hace zoom digital (recorte + escala)
-// sobre el propio <video>, que en cualquier navegador se ve igual de bien.
 function setupZoom() {
   currentZoomTrack = mediaStream.getVideoTracks()[0];
   const caps = currentZoomTrack.getCapabilities ? currentZoomTrack.getCapabilities() : {};
   const slider = $('zoom-slider');
   const video = $('video');
-  $('zoom-controls').classList.remove('hidden');
-  $('zoom-controls').classList.add('flex');
+  $('zoom-controls').classList.remove('hidden');$('zoom-controls').classList.add('flex');
 
   if (caps.zoom) {
     slider.min = caps.zoom.min;
     slider.max = caps.zoom.max;
     slider.step = caps.zoom.step || 0.1;
     slider.value = caps.zoom.min;
-    video.style.transform = 'scaleX(-1)'; // sin zoom digital extra
+    video.style.transform = 'scaleX(-1)';
     slider.oninput = async () => {
       const z = parseFloat(slider.value);
       $('zoom-label').textContent = z.toFixed(1) + 'x';
       try { await currentZoomTrack.applyConstraints({ advanced: [{ zoom: z }] }); } catch (_) {}
     };
   } else {
-    // Zoom digital: escalamos el video con CSS (mantenemos el espejo).
     slider.min = 1; slider.max = 3; slider.step = 0.1; slider.value = 1;
     slider.oninput = () => {
       const z = parseFloat(slider.value);
@@ -862,12 +848,39 @@ function setupZoom() {
   $('zoom-label').textContent = '1.0x';
 }
 
+// Botón de galería (álbum) dentro de la cámara
+$('btn-open-gallery').addEventListener('click', () => {$('input-file-gallery').click();
+});
+
+$('input-file-gallery').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function(event) {
+    const img = new Image();
+    img.onload = function() {
+      const canvas = $('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+
+      $('capture-live').classList.add('hidden');$('capture-live').classList.remove('flex');
+      $('capture-preview').classList.remove('hidden');$('capture-preview').classList.add('flex');
+
+      startAutoSendCountdown();
+    };
+    img.src = event.target.result;
+  };
+  reader.readAsDataURL(file);
+});
+
 $('btn-shutter').addEventListener('click', () => {
   playSoundShutter();
   const video = $('video');
   const canvas = $('canvas');
-  // Limitamos el lado más largo a 1280px: suficiente calidad para el
-  // feed y evita fotos pesadas/pixeladas al escalarlas de más.
   const MAX_SIDE = 1280;
   const scale = Math.min(1, MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
   canvas.width = Math.round(video.videoWidth * scale);
@@ -876,18 +889,11 @@ $('btn-shutter').addEventListener('click', () => {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
 
-  // Aplicamos el mismo zoom digital (si corresponde) al capturar, y
-  // NUNCA invertimos horizontalmente: la foto final se ve tal cual la
-  // realidad, no como un espejo (aunque el visor en vivo sí es espejo,
-  // por comodidad al encuadrarte).
   const videoTransform = video.style.transform || '';
   const zoomMatch = videoTransform.match(/scale\(([\d.]+)\)/);
   const digitalZoom = zoomMatch ? parseFloat(zoomMatch[1]) : 1;
 
   if (digitalZoom > 1) {
-    // El recorte se calcula sobre la resolución NATIVA del video (no
-    // sobre el canvas ya reducido), para que el zoom digital quede
-    // correcto aunque hayamos bajado la resolución de salida.
     const cropW = video.videoWidth / digitalZoom;
     const cropH = video.videoHeight / digitalZoom;
     const cropX = (video.videoWidth - cropW) / 2;
@@ -897,21 +903,18 @@ $('btn-shutter').addEventListener('click', () => {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   }
 
-  $('capture-live').classList.add('hidden'); $('capture-live').classList.remove('flex');
-  $('capture-preview').classList.remove('hidden'); $('capture-preview').classList.add('flex');
+  $('capture-live').classList.add('hidden');$('capture-live').classList.remove('flex');
+  $('capture-preview').classList.remove('hidden');$('capture-preview').classList.add('flex');
 
   startAutoSendCountdown();
 });
 
 $('btn-retake').addEventListener('click', () => {
   cancelAutoSend();
-  $('capture-preview').classList.add('hidden'); $('capture-preview').classList.remove('flex');
-  $('capture-live').classList.remove('hidden'); $('capture-live').classList.add('flex');
+  $('capture-preview').classList.add('hidden');$('capture-preview').classList.remove('flex');
+  $('capture-live').classList.remove('hidden');$('capture-live').classList.add('flex');
 });
 
-// La app ya NO espera a que presiones "Enviar": apenas tomas la foto
-// arranca una cuenta regresiva y se sube sola. Solo puedes cancelarla
-// tocando "Repetir".
 function startAutoSendCountdown() {
   let count = 2;
   $('autosend-count').textContent = count;
@@ -932,7 +935,7 @@ function cancelAutoSend() {
 
 async function sendPhoto() {
   $('capture-preview').classList.add('hidden');
-  $('capture-uploading').classList.remove('hidden'); $('capture-uploading').classList.add('flex');
+  $('capture-uploading').classList.remove('hidden');$('capture-uploading').classList.add('flex');
 
   const canvas = $('canvas');
   const blob = await new Promise(res => canvas.toBlob(res, 'image/webp', 0.92));
@@ -946,8 +949,6 @@ async function sendPhoto() {
 
   const { data: pub } = sb.storage.from('daily-snaps').getPublicUrl(path);
 
-  // Hora de Chile para saber si llega "tarde" (después de las 21:00,
-  // que es cuando llega el recordatorio push).
   const chileHour = parseInt(new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Santiago', hour: '2-digit', hour12: false
   }).format(new Date()), 10);
@@ -963,13 +964,10 @@ async function sendPhoto() {
 
   if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
   mediaStream = null;
-  $('capture-uploading').classList.add('hidden'); $('capture-uploading').classList.remove('flex');
+  $('capture-uploading').classList.add('hidden');$('capture-uploading').classList.remove('flex');
   await renderFeed();
 }
 
-// ============================================================
-// RACHA (con freeze automático)
-// ============================================================
 async function updateStreak(date) {
   const { data: prevPosts } = await sb.from('posts').select('date')
     .eq('user_id', currentUser.id).lt('date', date)
@@ -991,8 +989,6 @@ async function updateStreak(date) {
   if (prevPosts?.[0]?.date === yStr) {
     newCount = (currentProfile.streak_count || 0) + 1;
   } else if (prevPosts?.[0]?.date === twoStr && freezesLeft > 0) {
-    // Faltó exactamente un día: usamos un freeze automático para
-    // salvar la racha, como los "streak freeze" de Duolingo.
     newCount = (currentProfile.streak_count || 0) + 1;
     freezesLeft -= 1;
     usedFreeze = true;
@@ -1024,10 +1020,6 @@ async function registerPunishment(brokenDate) {
   });
 }
 
-// Racha grupal "perfecta": si TODOS los miembros activos del grupo
-// subieron foto hoy, sube el contador; si no todos subieron, se deja
-// como está (se reinicia solo cuando alguien rompe la racha individual
-// y por ende ya no hay "todos" un día).
 async function updateGroupPerfectStreak(date) {
   const { count: memberCount } = await sb.from('profiles')
     .select('id', { count: 'exact', head: true }).eq('group_id', currentGroup.id);
@@ -1045,18 +1037,9 @@ async function updateGroupPerfectStreak(date) {
   }
 }
 
-// ============================================================
-// NOTIFICACIONES PUSH (recordatorio 21:00 si no has subido)
-// ============================================================
-$('btn-notif').addEventListener('click', async () => {
-  if (!('Notification' in window)) { alert('Tu navegador no soporta notificaciones.'); return; }
-  if (Notification.permission === 'granted') { alert('Ya tienes activados los recordatorios de las 21:00 🔔'); return; }
-  await registerServiceWorkerAndPush(true);
-});
-
 async function registerServiceWorkerAndPush(userInitiated = false) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
-  if (!VAPID_PUBLIC_KEY || VAPID_PUBLIC_KEY.includes('PON_AQUI')) return; // aún no configurado
+  if (!VAPID_PUBLIC_KEY || VAPID_PUBLIC_KEY.includes('PON_AQUI')) return;
 
   try {
     const reg = await navigator.serviceWorker.register('sw.js');
