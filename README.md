@@ -1,3 +1,48 @@
+# BeStreak v3 — rediseño estilo Instagram
+
+## Qué se agregó en esta vuelta
+- **Perfil editable**: en la pestaña "Perfil" puedes cambiar tu foto
+  (toca tu avatar), tu nombre de usuario y tu biografía. Guarda con
+  "Guardar cambios".
+- **Tocar el nombre de cualquier usuario** (en el feed, el chat o el
+  ranking) abre su perfil de solo lectura: avatar, bio, estadísticas y
+  grid de sus publicaciones.
+- **Fotos más chicas y más nítidas**: el feed ahora muestra las fotos
+  en un cuadro 1:1 (como Instagram) con bordes redondeados y un ancho
+  máximo, en vez de ocupar toda la pantalla. Además, la captura se
+  guarda con más calidad (0.92 en vez de 0.85) y a una resolución
+  máxima de 1280px por lado, para que no se vean "rascas" al escalarse.
+- **Rediseño tipo Instagram**: barra inferior con 3 íconos (Inicio,
+  Chat, Perfil — sin historias ni reels, como pediste). El Ranking y
+  el Panel de administrador pasaron a ser pantallas propias
+  accesibles desde el ícono 🏆 y desde el botón del Perfil,
+  respectivamente, para no saturar la barra inferior.
+- **Deslizar hacia la izquierda en el Inicio abre la cámara**
+  automáticamente (gesto tipo Instagram/Snapchat).
+- **Chat con más detalle**: burbujas con avatar del remitente, hora de
+  cada mensaje, y nombre agrupado como en las apps de mensajería.
+  Se agregó un sonido corto al enviar y otro al recibir un mensaje
+  (generado en el momento, no son archivos de audio externos).
+- **Sin zoom al doble-tap**: se bloqueó el "double-tap to zoom" del
+  navegador (con `touch-action: manipulation` + una verificación en
+  JS), manteniendo el pellizco para zoom (pinch-zoom) por accesibilidad.
+
+## Nota honesta sobre "copia exacta de Instagram"
+Hice un rediseño visual profundo (feed, perfil con grid, chat con
+burbujas, nav inferior, gestos) inspirado 1:1 en los patrones de
+Instagram, pero no es un clon pixel-perfect de su código — eso
+implicaría reescribir la app desde cero con animaciones, transiciones
+y detalles que no alcanzan en una sola pasada. Si hay algo puntual que
+quieras que se vea más parecido (por ejemplo, doble-tap en la foto
+para reaccionar con ❤️, o una vista de foto en pantalla completa),
+dime cuál y lo afino en la próxima vuelta.
+
+## Un paso nuevo que debes hacer
+Corre `migration_v3.sql` en el SQL Editor de Supabase (agrega las
+columnas `bio` y `avatar_url` a `profiles`). Es seguro, no borra nada.
+
+---
+
 # BeStreak v2 — mejoras añadidas
 
 ## Qué se agregó

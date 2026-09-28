@@ -32,6 +32,61 @@ const todayStr = () => {
   return tz.toISOString().slice(0, 10);
 };
 
+// ============================================================
+// SONIDOS (generados con Web Audio, sin archivos externos)
+// ============================================================
+let audioCtx = null;
+function beep(freq, durationMs, volume = 0.12, type = 'sine', delayMs = 0) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const startAt = audioCtx.currentTime + delayMs / 1000;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, startAt);
+    gain.gain.setValueAtTime(volume, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.001, startAt + durationMs / 1000);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(startAt); osc.stop(startAt + durationMs / 1000);
+  } catch (_) { /* audio no soportado/no autorizado todavía, no pasa nada */ }
+}
+function playSoundSent() { beep(880, 90, 0.1, 'sine'); beep(1180, 90, 0.08, 'sine', 60); }
+function playSoundReceived() { beep(520, 100, 0.1, 'sine'); beep(700, 120, 0.08, 'sine', 70); }
+function playSoundShutter() { beep(1400, 60, 0.06, 'square'); }
+
+// ============================================================
+// EVITAR ZOOM AL DOBLE TAP (la app queda fija en 1x)
+// ============================================================
+(function disableDoubleTapZoom() {
+  let lastTouchEnd = 0;
+  document.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd <= 350) e.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
+  document.addEventListener('dblclick', (e) => e.preventDefault());
+})();
+
+// ============================================================
+// DESLIZAR HACIA LA IZQUIERDA EN EL HOME → ABRE LA CÁMARA
+// ============================================================
+(function setupSwipeToCamera() {
+  const zone = $('tab-hoy');
+  let startX = 0, startY = 0, tracking = false;
+  zone.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    startX = e.touches[0].clientX; startY = e.touches[0].clientY; tracking = true;
+  }, { passive: true });
+  zone.addEventListener('touchend', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const dx = (e.changedTouches[0].clientX - startX);
+    const dy = (e.changedTouches[0].clientY - startY);
+    if (dx < -70 && Math.abs(dx) > Math.abs(dy) * 1.8) openCapture();
+  }, { passive: true });
+})();
+
 function randomCode(len = 6) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
@@ -104,17 +159,78 @@ applyTheme(localStorage.getItem('bestreak-theme'));
 // ============================================================
 // TABS
 // ============================================================
-document.querySelectorAll('.tab-btn').forEach(btn => {
+document.querySelectorAll('.bottom-nav-btn').forEach(btn => {
   btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
 
 function switchTab(tabId) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabId));
+  document.querySelectorAll('.bottom-nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabId));
   document.querySelectorAll('.tabpanel').forEach(p => p.classList.toggle('active', p.id === tabId));
-  if (tabId === 'tab-ranking') renderRanking();
   if (tabId === 'tab-chat') { renderChat(); }
   if (tabId === 'tab-perfil') { renderProfileTab(); }
-  if (tabId === 'tab-admin') { renderAdmin(); }
+}
+
+// ---------- Overlays: Ranking / Perfil de otro usuario / Admin ----------
+function openOverlay(id) { document.getElementById(id).classList.add('active'); }
+function closeOverlay(id) { document.getElementById(id).classList.remove('active'); }
+
+$('btn-ranking').addEventListener('click', () => { openOverlay('screen-ranking-overlay'); renderRanking(); });
+$('btn-close-ranking').addEventListener('click', () => closeOverlay('screen-ranking-overlay'));
+
+$('btn-open-admin').addEventListener('click', () => { openOverlay('screen-admin-overlay'); renderAdmin(); });
+$('btn-close-admin').addEventListener('click', () => closeOverlay('screen-admin-overlay'));
+
+$('btn-close-user-profile').addEventListener('click', () => closeOverlay('screen-user-profile-overlay'));
+
+// Avatar helper: pone la imagen si existe, o un círculo con la inicial
+// del nombre de usuario si la persona todavía no ha subido foto de perfil.
+function paintAvatar(imgEl, fallbackEl, avatarUrl, username) {
+  if (avatarUrl) {
+    imgEl.src = avatarUrl; imgEl.style.display = '';
+    if (fallbackEl) fallbackEl.style.display = 'none';
+  } else {
+    imgEl.removeAttribute('src'); imgEl.style.display = 'none';
+    if (fallbackEl) {
+      fallbackEl.style.display = 'flex';
+      fallbackEl.textContent = (username || '?').trim().charAt(0).toUpperCase();
+    }
+  }
+}
+
+// Abre el perfil de cualquier miembro del grupo tocando su nombre.
+// Si es tu propio nombre, simplemente te lleva a tu pestaña "Perfil".
+async function openUserProfile(userId) {
+  if (userId === currentUser.id) { switchTab('tab-perfil'); return; }
+  const { data: profile } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+  if (!profile) return;
+
+  $('user-profile-title').textContent = profile.username;
+  paintAvatar($('user-profile-avatar-img'), $('user-profile-avatar-fallback'), profile.avatar_url, profile.username);
+  $('user-profile-bio').textContent = profile.bio || 'Sin biografía todavía.';
+  $('user-profile-best').textContent = Math.max(profile.best_streak || 0, profile.streak_count || 0);
+  $('user-profile-streak').textContent = profile.streak_count || 0;
+
+  const { data: posts } = await sb.from('posts').select('image_url, date')
+    .eq('user_id', userId).order('date', { ascending: false }).limit(30);
+  $('user-profile-post-count').textContent = (posts || []).length;
+  paintPostGrid('user-profile-grid', posts || []);
+
+  openOverlay('screen-user-profile-overlay');
+}
+
+function paintPostGrid(containerId, posts) {
+  const grid = $(containerId);
+  grid.innerHTML = '';
+  if (!posts.length) {
+    grid.innerHTML = '<p class="col-span-3 text-center text-sm text-muted-app py-6">Todavía no hay publicaciones.</p>';
+    return;
+  }
+  posts.forEach(p => {
+    const cell = document.createElement('div');
+    cell.className = 'profile-grid-cell';
+    cell.innerHTML = `<img src="${p.image_url}" loading="lazy" alt="${p.date}" />`;
+    grid.appendChild(cell);
+  });
 }
 
 // ============================================================
@@ -176,7 +292,7 @@ async function maybeGrantAdmin() {
       if (data) currentProfile = data;
     }
   } catch (_) { /* si falla, simplemente no se activa admin todavía */ }
-  $('tab-admin-btn').classList.toggle('hidden', !currentProfile.is_admin);
+  $('btn-open-admin').classList.toggle('hidden', !currentProfile.is_admin);
 }
 
 async function recoverFromDuplicateProfile(msgElId) {
@@ -296,7 +412,9 @@ async function renderFeed() {
   $('feed-group-name').textContent = currentGroup.name;
   $('feed-punishment').textContent = '🎯 ' + currentGroup.punishment + ` · código ${currentGroup.join_code}`;
   $('my-streak').textContent = currentProfile.streak_count;
+  $('my-streak-2').textContent = currentProfile.streak_count;
   $('my-freezes').textContent = `❄️ ${currentProfile.freezes_available ?? 0}`;
+  paintAvatar($('nav-avatar-img'), $('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
 
   if ((currentGroup.group_streak_count || 0) > 0) {
     $('group-perfect-badge').classList.remove('hidden');
@@ -319,7 +437,7 @@ async function renderFeed() {
   $('feed-unlocked').classList.add('flex');
 
   const { data: posts } = await sb.from('posts')
-    .select('*, profiles(username, streak_count), post_reactions(user_id, emoji), post_comments(id, user_id, body, created_at, profiles(username))')
+    .select('*, profiles(username, streak_count, avatar_url), post_reactions(user_id, emoji), post_comments(id, user_id, body, created_at, profiles(username))')
     .eq('group_id', currentGroup.id).eq('date', todayStr())
     .order('created_at', { ascending: false });
 
@@ -333,35 +451,39 @@ function renderFeedList(posts) {
   list.innerHTML = '';
   posts.forEach(p => {
     const card = document.createElement('div');
-    card.className = 'border-2 border-app bg-card';
+    card.className = 'ig-post px-3 pt-2';
 
     const reactionCounts = {};
-    (p.post_reactions || []).forEach(r => { reactionCounts[r.emoji] = (reactionCounts[r.emoji] || 0) + 1; });
+    let totalReactions = 0;
+    (p.post_reactions || []).forEach(r => { reactionCounts[r.emoji] = (reactionCounts[r.emoji] || 0) + 1; totalReactions++; });
     const myReaction = (p.post_reactions || []).find(r => r.user_id === currentUser.id)?.emoji;
 
     const reactionsHtml = REACTION_EMOJIS.map(e => `
       <button data-post="${p.id}" data-emoji="${e}"
-        class="reaction-btn text-sm px-2 py-1 rounded-full border border-app ${myReaction === e ? 'bg-accent text-accent-fg' : ''}">
-        ${e} ${reactionCounts[e] || ''}
-      </button>`).join('');
+        class="reaction-btn ig-icon-btn ${myReaction === e ? 'opacity-100' : 'opacity-50'}">${e}</button>`).join('');
 
     const commentsHtml = (p.post_comments || [])
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .map(c => `<p class="text-xs"><b>${c.profiles?.username ?? 'usuario'}:</b> ${escapeHtml(c.body)}</p>`)
+      .map(c => `<p class="text-xs"><span class="username-link ig-username" data-user="${c.user_id}">${c.profiles?.username ?? 'usuario'}</span> ${escapeHtml(c.body)}</p>`)
       .join('');
 
     card.innerHTML = `
-      <div class="flex items-center justify-between px-3 py-2 border-b-2 border-app">
-        <span class="font-bold">${p.profiles?.username ?? 'usuario'}</span>
-        <span class="text-sm">🔥 ${p.profiles?.streak_count ?? 0} ${p.is_late ? '· <span class="text-fail">tarde</span>' : ''}</span>
+      <div class="flex items-center gap-2 pb-2">
+        <img class="ig-avatar post-avatar-img" data-user="${p.user_id}" src="${p.profiles?.avatar_url || ''}" style="${p.profiles?.avatar_url ? '' : 'display:none'}" />
+        <span class="ig-avatar ig-avatar-fallback post-avatar-fallback text-sm" data-user="${p.user_id}" style="${p.profiles?.avatar_url ? 'display:none' : ''}">${(p.profiles?.username || '?').charAt(0).toUpperCase()}</span>
+        <div class="flex-1 leading-tight">
+          <span class="username-link ig-username block" data-user="${p.user_id}">${p.profiles?.username ?? 'usuario'}</span>
+          <span class="text-[11px] text-muted-app">🔥 ${p.profiles?.streak_count ?? 0}${p.is_late ? ' · <span class="text-fail">tarde</span>' : ''}</span>
+        </div>
       </div>
-      <img src="${p.image_url}" class="w-full aspect-[3/4] object-cover" />
-      ${p.caption ? `<p class="px-3 pt-2 text-sm">${escapeHtml(p.caption)}</p>` : ''}
-      <div class="flex flex-wrap gap-2 px-3 py-2">${reactionsHtml}</div>
-      <div class="px-3 pb-2 flex flex-col gap-1">${commentsHtml}</div>
-      <form class="comment-form flex gap-2 px-3 pb-3" data-post="${p.id}">
-        <input type="text" maxlength="300" placeholder="Comenta…" class="flex-1 border border-app bg-transparent px-2 py-1 text-xs outline-none" />
-        <button type="submit" class="text-xs font-bold underline">Enviar</button>
+      <div class="ig-post-img-wrap"><img src="${p.image_url}" loading="lazy" /></div>
+      <div class="flex items-center gap-1 pt-2">${reactionsHtml}</div>
+      ${totalReactions ? `<p class="text-xs font-bold pt-1">${totalReactions} reacción${totalReactions === 1 ? '' : 'es'}</p>` : ''}
+      ${p.caption ? `<p class="pt-1 text-sm"><span class="ig-username">${p.profiles?.username ?? 'usuario'}</span> ${escapeHtml(p.caption)}</p>` : ''}
+      <div class="pt-1 flex flex-col gap-0.5">${commentsHtml}</div>
+      <form class="comment-form flex items-center gap-2 py-2" data-post="${p.id}">
+        <input type="text" maxlength="300" placeholder="Comenta…" class="flex-1 bg-transparent px-1 py-1 text-sm outline-none" />
+        <button type="submit" class="text-sm font-bold text-accent">Enviar</button>
       </form>
     `;
     list.appendChild(card);
@@ -369,6 +491,9 @@ function renderFeedList(posts) {
 
   list.querySelectorAll('.reaction-btn').forEach(btn => {
     btn.addEventListener('click', () => toggleReaction(btn.dataset.post, btn.dataset.emoji));
+  });
+  list.querySelectorAll('.username-link, .post-avatar-img, .post-avatar-fallback').forEach(el => {
+    el.addEventListener('click', () => openUserProfile(el.dataset.user));
   });
   list.querySelectorAll('.comment-form').forEach(form => {
     form.addEventListener('submit', async (e) => {
@@ -415,10 +540,13 @@ async function renderRanking() {
     const row = document.createElement('div');
     row.className = 'flex items-center justify-between border-b border-divider py-2';
     row.innerHTML = `
-      <span class="font-bold">${i + 1}. ${m.username}${m.id === currentUser.id ? ' (tú)' : ''}</span>
+      <span class="font-bold">${i + 1}. <span class="username-link ig-username" data-user="${m.id}">${m.username}</span>${m.id === currentUser.id ? ' (tú)' : ''}</span>
       <span class="text-sm">🔥 ${m.streak_count} · mejor ${m.best_streak ?? 0}</span>
     `;
     list.appendChild(row);
+  });
+  list.querySelectorAll('.username-link').forEach(el => {
+    el.addEventListener('click', () => { closeOverlay('screen-ranking-overlay'); openUserProfile(el.dataset.user); });
   });
 
   const { data: punishments } = await sb.from('punishment_log').select('*, profiles(username)')
@@ -452,20 +580,46 @@ async function renderRanking() {
 // CHAT DE GRUPO
 // ============================================================
 async function renderChat() {
-  const { data: messages } = await sb.from('group_messages').select('*, profiles(username)')
+  const { data: messages } = await sb.from('group_messages').select('*, profiles(username, avatar_url)')
     .eq('group_id', currentGroup.id).order('created_at', { ascending: true }).limit(200);
   paintChatMessages(messages || []);
+}
+
+function formatChatTime(iso) {
+  return new Date(iso).toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' });
 }
 
 function paintChatMessages(messages) {
   const list = $('chat-list');
   list.innerHTML = '';
+  let prevSender = null;
   messages.forEach(m => {
     const mine = m.user_id === currentUser.id;
+    const showAvatar = !mine && prevSender !== m.user_id;
+    prevSender = m.user_id;
+
     const row = document.createElement('div');
-    row.className = `max-w-[80%] px-3 py-2 rounded-2xl text-sm ${mine ? 'self-end bg-accent text-accent-fg' : 'self-start bg-card border border-app'}`;
-    row.innerHTML = `${!mine ? `<p class="text-xs font-bold opacity-70">${m.profiles?.username ?? 'usuario'}</p>` : ''}<p>${escapeHtml(m.body)}</p>`;
+    row.className = `chat-row ${mine ? 'justify-end' : 'justify-start'}`;
+
+    const avatarHtml = !mine
+      ? (showAvatar
+          ? `<img class="ig-avatar chat-avatar-img" style="width:26px;height:26px;${m.profiles?.avatar_url ? '' : 'display:none'}" data-user="${m.user_id}" src="${m.profiles?.avatar_url || ''}" />
+             <span class="ig-avatar ig-avatar-fallback chat-avatar-fallback text-[11px]" style="width:26px;height:26px;${m.profiles?.avatar_url ? 'display:none' : ''}" data-user="${m.user_id}">${(m.profiles?.username || '?').charAt(0).toUpperCase()}</span>`
+          : `<span style="width:26px" class="shrink-0"></span>`)
+      : '';
+
+    row.innerHTML = `
+      ${avatarHtml}
+      <div class="flex flex-col ${mine ? 'items-end' : 'items-start'}">
+        ${(!mine && showAvatar) ? `<span class="username-link ig-username text-[11px] mb-0.5 ml-1" data-user="${m.user_id}">${m.profiles?.username ?? 'usuario'}</span>` : ''}
+        <div class="chat-bubble ${mine ? 'bg-accent text-accent-fg' : 'bg-card border border-app'}">${escapeHtml(m.body)}</div>
+        <span class="chat-time ${mine ? 'mr-1' : 'ml-1'}">${formatChatTime(m.created_at)}</span>
+      </div>
+    `;
     list.appendChild(row);
+  });
+  list.querySelectorAll('.username-link, .chat-avatar-img, .chat-avatar-fallback').forEach(el => {
+    el.addEventListener('click', () => openUserProfile(el.dataset.user));
   });
   list.scrollTop = list.scrollHeight;
 }
@@ -476,7 +630,10 @@ function setupChatRealtime() {
     .on('postgres_changes', {
       event: 'INSERT', schema: 'public', table: 'group_messages',
       filter: `group_id=eq.${currentGroup.id}`
-    }, async () => { if ($('tab-chat').classList.contains('active')) await renderChat(); })
+    }, async (payload) => {
+      if (payload.new?.user_id && payload.new.user_id !== currentUser.id) playSoundReceived();
+      if ($('tab-chat').classList.contains('active')) await renderChat();
+    })
     .subscribe();
 }
 function teardownChat() {
@@ -491,6 +648,7 @@ async function sendChatMessage() {
   if (!body) return;
   input.value = '';
   await sb.from('group_messages').insert({ group_id: currentGroup.id, user_id: currentUser.id, body });
+  playSoundSent();
   await renderChat();
 }
 
@@ -508,8 +666,11 @@ const BADGE_MILESTONES = [
 ];
 
 async function renderProfileTab() {
-  $('profile-username').textContent = currentProfile.username;
+  $('input-edit-username').value = currentProfile.username;
+  $('input-edit-bio').value = currentProfile.bio || '';
+  paintAvatar($('profile-avatar-img'), $('profile-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
   $('profile-best').textContent = currentProfile.best_streak ?? 0;
+  $('my-streak-2').textContent = currentProfile.streak_count ?? 0;
   $('profile-freezes').textContent = currentProfile.freezes_available ?? 0;
   renderThemeGrid();
 
@@ -524,9 +685,12 @@ async function renderProfileTab() {
     badges.appendChild(el);
   });
 
-  const { data: posts } = await sb.from('posts').select('date')
-    .eq('user_id', currentUser.id).order('date', { ascending: false }).limit(105);
-  const postedDates = new Set((posts || []).map(p => p.date));
+  const { data: allMyPosts } = await sb.from('posts').select('date, image_url')
+    .eq('user_id', currentUser.id).order('date', { ascending: false }).limit(200);
+  const postedDates = new Set((allMyPosts || []).map(p => p.date));
+
+  $('profile-post-count').textContent = (allMyPosts || []).length;
+  paintPostGrid('my-profile-grid', allMyPosts || []);
 
   const grid = $('heatmap');
   grid.innerHTML = '';
@@ -545,6 +709,42 @@ async function renderProfileTab() {
     grid.appendChild(cell);
   });
 }
+
+// ---------- Editar perfil: username + bio ----------
+$('btn-save-profile').addEventListener('click', async () => {
+  const username = $('input-edit-username').value.trim();
+  const bio = $('input-edit-bio').value.trim();
+  if (!username) return;
+  const btn = $('btn-save-profile');
+  btn.disabled = true; const original = btn.textContent; btn.textContent = 'Guardando…';
+  const { data, error } = await sb.from('profiles').update({ username, bio }).eq('id', currentUser.id).select().maybeSingle();
+  btn.disabled = false; btn.textContent = original;
+  if (error) { alert('No se pudo guardar tu perfil: ' + error.message); return; }
+  if (data) currentProfile = data;
+  paintAvatar($('nav-avatar-img'), $('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
+});
+
+// ---------- Editar perfil: foto de avatar ----------
+$('btn-change-avatar').addEventListener('click', () => $('input-avatar-file').click());
+$('input-avatar-file').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const path = `${currentUser.id}/avatar.webp`;
+    const { error: upErr } = await sb.storage.from('daily-snaps').upload(path, file, { upsert: true, contentType: file.type || 'image/webp' });
+    if (upErr) { alert('No se pudo subir la foto: ' + upErr.message); return; }
+    const { data: pub } = sb.storage.from('daily-snaps').getPublicUrl(path);
+    const avatar_url = pub.publicUrl + '?t=' + Date.now(); // evita caché vieja
+    const { data, error } = await sb.from('profiles').update({ avatar_url }).eq('id', currentUser.id).select().maybeSingle();
+    if (error) { alert('No se pudo guardar tu foto de perfil: ' + error.message); return; }
+    if (data) currentProfile = data;
+    paintAvatar($('profile-avatar-img'), $('profile-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
+    paintAvatar($('nav-avatar-img'), $('nav-avatar-fallback'), currentProfile.avatar_url, currentProfile.username);
+  } catch (err) {
+    alert('Error inesperado subiendo tu foto: ' + (err?.message || err));
+  }
+});
 
 async function resetMonthlyFreezesIfNeeded() {
   const month = new Date().toISOString().slice(0, 7); // YYYY-MM
@@ -663,11 +863,18 @@ function setupZoom() {
 }
 
 $('btn-shutter').addEventListener('click', () => {
+  playSoundShutter();
   const video = $('video');
   const canvas = $('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  // Limitamos el lado más largo a 1280px: suficiente calidad para el
+  // feed y evita fotos pesadas/pixeladas al escalarlas de más.
+  const MAX_SIDE = 1280;
+  const scale = Math.min(1, MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
   const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
   // Aplicamos el mismo zoom digital (si corresponde) al capturar, y
   // NUNCA invertimos horizontalmente: la foto final se ve tal cual la
@@ -678,10 +885,13 @@ $('btn-shutter').addEventListener('click', () => {
   const digitalZoom = zoomMatch ? parseFloat(zoomMatch[1]) : 1;
 
   if (digitalZoom > 1) {
-    const cropW = canvas.width / digitalZoom;
-    const cropH = canvas.height / digitalZoom;
-    const cropX = (canvas.width - cropW) / 2;
-    const cropY = (canvas.height - cropH) / 2;
+    // El recorte se calcula sobre la resolución NATIVA del video (no
+    // sobre el canvas ya reducido), para que el zoom digital quede
+    // correcto aunque hayamos bajado la resolución de salida.
+    const cropW = video.videoWidth / digitalZoom;
+    const cropH = video.videoHeight / digitalZoom;
+    const cropX = (video.videoWidth - cropW) / 2;
+    const cropY = (video.videoHeight - cropH) / 2;
     ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, canvas.width, canvas.height);
   } else {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -725,7 +935,7 @@ async function sendPhoto() {
   $('capture-uploading').classList.remove('hidden'); $('capture-uploading').classList.add('flex');
 
   const canvas = $('canvas');
-  const blob = await new Promise(res => canvas.toBlob(res, 'image/webp', 0.85));
+  const blob = await new Promise(res => canvas.toBlob(res, 'image/webp', 0.92));
   const date = todayStr();
   const path = `${currentUser.id}/${date}.webp`;
 
